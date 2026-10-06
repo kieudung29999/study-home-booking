@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+    function me() { return get(/databases/$(db)/documents/users/$(request.auth.uid)).data; }
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && me().role == 'admin'; }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if signedIn() && ((request.auth.uid == uid && request.resource.data.role in ['student','lecturer']) || isAdmin());
+      allow update: if signedIn() && ((request.auth.uid == uid && request.resource.data.role == resource.data.role
+                        && request.resource.data.disabled == resource.data.disabled) || isAdmin());
+    }
+    match /rooms/{id} { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /slots/{id} { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /bookings/{id} {
+      allow read: if signedIn();
+      // Doc ID = roomId_date_slotId_uid => a person cannot hold the same ca twice
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.role == me().role;
+      // Owner or admin can cancel; a lecturer can remove a STUDENT's booking (priority bump when the ca is full)
+      allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin()
+                    || (me().role == 'lecturer' && resource.data.role == 'student'));
+    }
+    // Per-ca counter used by the booking transaction; count can never exceed the room's seats
+    match /slotStats/{id} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.resource.data.count >= 0
+        && request.resource.data.count <= get(/databases/$(db)/documents/rooms/$(request.resource.data.roomId)).data.seats;
+      allow delete: if isAdmin();
+    }
+    // Message left for a student who was bumped by a lecturer
+    match /notices/{id} {
+      allow read, delete: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create: if signedIn() && me().role == 'lecturer';
+    }
+  }
+}
